@@ -7,7 +7,7 @@
     "icon": "./assets/icon.png",
     "scheme": "qasr-kitchen",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "plugins": [
       "expo-router",
       "expo-av"
@@ -18,7 +18,11 @@
         "backgroundColor": "#0C0A08"
       },
       "package": "com.qasrafghani.kitchen",
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -26,6 +30,12 @@
     },
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "b268f39f-a465-4ab5-97a2-cd89116623cd"
+      }
     }
   }
 }
