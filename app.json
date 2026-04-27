@@ -7,7 +7,7 @@
     "icon": "./assets/icon.png",
     "scheme": "qasr-kitchen",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "plugins": [
       "expo-router",
       "expo-av"
