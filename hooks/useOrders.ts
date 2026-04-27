@@ -5,8 +5,10 @@ import { activeOrdersQuery } from '../lib/queries'
 import { Order } from '../lib/types'
 import { useAlarmStore } from '../lib/store/alarmStore'
 import { stopAlarm, playBeep } from '../lib/sound'
-import { sendOrderSMS } from '../lib/sms'
+import { sendOrderEmail } from '../lib/notifications'
 import { showToast } from '../components/Toast'
+import { restaurantInfoQuery } from '../lib/queries'
+import { useRestaurantStore } from '../lib/store/restaurantStore'
 
 export function useOrders() {
   const [orders,      setOrders]      = useState<Order[]>([])
@@ -23,6 +25,13 @@ export function useOrders() {
       setOrders(data)
       // Mark all existing orders as known — no alarm for pre-existing orders
       data.forEach(o => knownOrderIds.current.add(o._id))
+
+      // Fetch logo URL for emails
+      const restInfo = await client.fetch(restaurantInfoQuery)
+      if (restInfo?.logo?.asset?.url) {
+        useRestaurantStore.getState().setLogoUrl(restInfo.logo.asset.url)
+      }
+
       setLoading(false)
       setError(null)
       setIsConnected(true)
@@ -54,7 +63,7 @@ export function useOrders() {
           const updatedOrder = update.result as unknown as Order
           const isNewOrder =
             !knownOrderIds.current.has(updatedOrder._id) &&
-            updatedOrder.status === 'new'
+            (updatedOrder.status === 'new' || updatedOrder.status === 'scheduled')
 
           if (isNewOrder) {
             knownOrderIds.current.add(updatedOrder._id)
@@ -86,22 +95,41 @@ export function useOrders() {
         const schedTime = new Date(order.scheduledTime!)
         const minutesUntil = (schedTime.getTime() - now.getTime()) / 60000
 
-        // Alert at exactly 30 minutes before
-        if (minutesUntil <= 30 && minutesUntil > 29) {
+        // Activation Alarm: Alert when order enters the 30-minute preparation window
+        if (minutesUntil <= 30 && minutesUntil > 0) {
           if (!alreadyAlerted.current.has(order._id)) {
             alreadyAlerted.current.add(order._id)
+            console.log(`[alarm] Activating scheduled order ${order.orderId} - ${Math.round(minutesUntil)} mins left`)
             
-            // 1. Play non-intrusive beep
-            playBeep()
+            // Automatically promote to 'new' status so it shows up for confirmation
+            client.patch(order._id).set({ status: 'new' }).commit()
+              .catch(err => console.error('[activation] Failed to update status:', err))
 
-            // 2. Show Toast
-            showToast(`📅 Scheduled order ${order.orderId} starting in 30 mins`, 'info')
+            startAlarmStore(order._id)
+            showToast(`Scheduled Order #${order.orderId} is now active!`, 'info')
           }
         }
       })
-    }, 60000)
+
+      // Reminder Alarm: Re-sound alarm for new (unconfirmed) orders every 2 mins
+      const newOrders = orders.filter(o => o.status === 'new')
+      newOrders.forEach(order => {
+        const placedAt = new Date(order.placedAt)
+        const minsSincePlaced = (now.getTime() - placedAt.getTime()) / 60000
+        
+        // If unconfirmed for > 2 mins, and we haven't reminded in the last 2 mins
+        if (minsSincePlaced >= 2) {
+          const lastReminder = (order as any)._lastReminder || 0
+          if (now.getTime() - lastReminder > 120000) {
+            (order as any)._lastReminder = now.getTime()
+            console.log(`[alarm] Reminder for unconfirmed order #${order.orderId}`)
+            startAlarmStore(order._id)
+          }
+        }
+      })
+    }, 30000) // Check every 30s for better accuracy
     return () => clearInterval(id)
-  }, [orders])
+  }, [orders, startAlarmStore])
 
   // Safety Fallback: Poll every 10s if listener is offline
   useEffect(() => {
@@ -112,12 +140,12 @@ export function useOrders() {
     return () => clearInterval(id)
   }, [isConnected, fetchOrders])
 
-  async function updateOrderStatus(orderId: string, newStatus: Order['status'], message?: string) {
+  async function updateOrderStatus(orderId: string, newStatus: Order['status'], kitchenMsg?: string, overrideData?: Partial<Order>) {
     try {
-      const patches: any = { status: newStatus }
-      if (message) patches.kitchenMessage = message
+      const updateObj: any = { status: newStatus }
+      if (kitchenMsg !== undefined) updateObj.kitchenMessage = kitchenMsg
 
-      await client.patch(orderId).set(patches).commit()
+      await client.patch(orderId).set(updateObj).commit()
 
       // Accepting an order → stop its alarm
       if (newStatus === 'preparing') {
@@ -133,45 +161,92 @@ export function useOrders() {
         setOrders(prev => prev.filter(o => o._id !== orderId))
       }
 
-      // SMS Notifications
-      const order = orders.find(o => o._id === orderId)
+      // Email Notifications
+      let order = orders.find(o => o._id === orderId)
       if (!order) return
 
-      // 1. Accepted Scheduled Order SMS
-      if (order.status === 'scheduled' && newStatus === 'preparing' && order.orderType !== 'reservation') {
-        sendOrderSMS({
-          to: order.customerPhone,
+      // Merge override data for notification (if provided)
+      if (overrideData) {
+        order = { ...order, ...overrideData }
+      }
+
+      const logoUrl = useRestaurantStore.getState().logoUrl
+
+      // 1. ACCEPT: Send confirmed email for ALL order types when kitchen accepts
+      if (newStatus === 'preparing' && order.orderType !== 'reservation') {
+        sendOrderEmail({
+          customerEmail: order.customerEmail,
+          customerPhone: order.customerPhone,
           type: 'confirmed',
           data: {
             orderId: order.orderId,
             customerName: order.customerName,
-            estimatedTime: order.estimatedTime || 30
+            estimatedTime: order.estimatedTime || 30,
+            tableNumber: order.tableNumber,
+            items: order.items,
+            subtotal: order.subtotal,
+            tax: order.tax,
+            total: order.total,
+            specialRequests: order.specialRequests,
+            placedAt: order.placedAt,
+            discountAmount: order.discountAmount,
+            adjustmentReason: (order as any).adjustmentReason,
+            promoCode: order.promoCode,
+            promoDiscount: order.promoDiscount,
+            kitchenMessage: kitchenMsg,
+            logoUrl
           }
         })
       }
 
-      // 1b. Accepted Reservation SMS
+      // 1b. ACCEPT Reservation: Send reservation reminder
       if (newStatus === 'preparing' && order.orderType === 'reservation') {
-        sendOrderSMS({
-          to: order.customerPhone,
+        sendOrderEmail({
+          customerEmail: order.customerEmail,
+          customerPhone: order.customerPhone,
           type: 'reservation_reminder',
           data: {
             orderId: order.orderId,
             customerName: order.customerName,
             guestCount: order.guestCount || 1,
-            formattedTime: order.reservationTime ? format(parseISO(order.reservationTime), 'h:mm a') : 'your reserved time'
+            formattedTime: order.reservationTime ? format(parseISO(order.reservationTime), 'EEEE, MMM d \u2018at\u2019 h:mm a') : 'your reserved time',
+            logoUrl
           }
         })
       }
 
-      // 2. Ready SMS: ONLY for pickup orders
-      if (newStatus === 'ready' && order.orderType === 'pickup') {
-        sendOrderSMS({
-          to: order.customerPhone,
+      // 2. READY: Send ready email for pickup and dine-in
+      if (newStatus === 'ready') {
+        sendOrderEmail({
+          customerEmail: order.customerEmail,
+          customerPhone: order.customerPhone,
           type: 'ready',
           data: {
             orderId: order.orderId,
             customerName: order.customerName,
+            discountAmount: order.discountAmount,
+            adjustmentReason: (order as any).adjustmentReason,
+            promoCode: order.promoCode,
+            promoDiscount: order.promoDiscount,
+            kitchenMessage: kitchenMsg,
+            logoUrl
+          }
+        })
+      }
+
+      // 3. CANCELLED: Send cancellation email
+      if (newStatus === 'cancelled') {
+        sendOrderEmail({
+          customerEmail: order.customerEmail,
+          customerPhone: order.customerPhone,
+          type: 'cancelled',
+          data: {
+            orderId: order.orderId,
+            customerName: order.customerName,
+            reason: (overrideData as any)?.reason || kitchenMsg || 'Order cancelled by restaurant',
+            items: order.items,
+            total: order.total,
+            logoUrl
           }
         })
       }

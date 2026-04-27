@@ -10,27 +10,36 @@ import { client } from '../lib/sanity'
 import { showToast } from './Toast'
 
 interface AdjustmentSheetsProps {
-  type: 'time' | 'price' | 'cancel' | null
+  type: 'time' | 'cancel' | null
   order: Order
+  updateOrderStatus: (orderId: string, newStatus: Order['status'], kitchenMsg?: string, overrideData?: any) => Promise<void>
   onClose: () => void
   onSuccess: () => void
 }
 
-export function AdjustmentSheets({ type, order, onClose, onSuccess }: AdjustmentSheetsProps) {
+export function AdjustmentSheets({ type, order, updateOrderStatus, onClose, onSuccess }: AdjustmentSheetsProps) {
   const [loading, setLoading] = useState(false)
   const [value, setValue] = useState('')
   const [reason, setReason] = useState('')
   const [tempTime, setTempTime] = useState(order.estimatedTime || 30)
   const [message, setMessage] = useState('')
+  // Price adjustment: tracks delta from original total (negative = discount, positive = surcharge)
+  const [priceDelta, setPriceDelta] = useState(0)
 
   if (!type) return null
 
   async function handleAdjustTime() {
     try {
       setLoading(true)
+      // Update in Sanity
       await client.patch(order._id)
         .set({ estimatedTime: tempTime, adjustmentReason: 'Time adjusted by kitchen' })
         .commit()
+
+      // Trigger email notification
+      await updateOrderStatus(order._id, order.status, 'Time adjusted by kitchen', {
+        estimatedTime: tempTime
+      })
 
       showToast(`Time updated to ${tempTime}m`, 'success')
       onSuccess()
@@ -42,23 +51,24 @@ export function AdjustmentSheets({ type, order, onClose, onSuccess }: Adjustment
   }
 
   async function handleAdjustPrice() {
-    const discount = parseFloat(value)
-    if (isNaN(discount) || discount <= 0) {
-      return showToast('Enter a valid discount amount', 'error')
-    }
+    // priceDelta negative = discount, positive = surcharge
+    if (priceDelta === 0) return showToast('No adjustment made', 'error')
 
     try {
       setLoading(true)
-      const newTotal = Math.max(0, (order.total || 0) - discount)
+      const originalTotal = order.total || 0
+      const newTotal = Math.max(0, originalTotal + priceDelta)
+      const discountAmount = priceDelta < 0 ? Math.abs(priceDelta) : 0
+
       await client.patch(order._id)
         .set({
-          discountAmount: discount,
+          discountAmount: discountAmount || undefined,
           total: newTotal,
-          adjustmentReason: reason || 'Price adjusted by staff'
+          adjustmentReason: reason || (priceDelta < 0 ? 'Discount applied by staff' : 'Price adjustment by staff')
         })
         .commit()
 
-      showToast('Price adjusted', 'success')
+      showToast(`Price updated to $${newTotal.toFixed(2)}`, 'success')
       onSuccess()
     } catch (err) {
       showToast('Failed to adjust price', 'error')
@@ -72,13 +82,14 @@ export function AdjustmentSheets({ type, order, onClose, onSuccess }: Adjustment
 
     try {
       setLoading(true)
-      await client.patch(order._id)
-        .set({
-          status: 'cancelled',
-          cancellationReason: reason,
-          kitchenMessage: message || `Order cancelled: ${reason}`
-        })
-        .commit()
+      const cancelMsg = message || `Order cancelled: ${reason}`
+      
+      // Update status and send email via centralized function
+      await updateOrderStatus(order._id, 'cancelled', cancelMsg, {
+        reason: cancelMsg,
+        items: order.items,
+        total: order.total
+      })
 
       showToast('Order cancelled', 'success')
       onSuccess()
@@ -98,7 +109,7 @@ export function AdjustmentSheets({ type, order, onClose, onSuccess }: Adjustment
         >
           <View style={styles.sheetHeader}>
             <Text style={styles.sheetTitle}>
-              {type === 'time' ? 'Adjust Pickup Time' : type === 'price' ? 'Apply Discount' : 'Cancel Order'}
+              {type === 'time' ? 'Adjust Pickup Time' : 'Cancel Order'}
             </Text>
             <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
               <Text style={styles.closeText}>✕</Text>
@@ -136,35 +147,6 @@ export function AdjustmentSheets({ type, order, onClose, onSuccess }: Adjustment
                   disabled={loading}
                 >
                   {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitBtnText}>CONFIRM TIME</Text>}
-                </TouchableOpacity>
-              </View>
-            )}
-
-            {type === 'price' && (
-              <View style={styles.form}>
-                <Text style={styles.inputLabel}>Discount Amount ($)</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="0.00"
-                  placeholderTextColor={theme.colors.cream.muted}
-                  keyboardType="decimal-pad"
-                  value={value}
-                  onChangeText={setValue}
-                />
-                <Text style={styles.inputLabel}>Reason (optional)</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="e.g. Item out of stock"
-                  placeholderTextColor={theme.colors.cream.muted}
-                  value={reason}
-                  onChangeText={setReason}
-                />
-                <TouchableOpacity
-                  style={styles.submitBtn}
-                  onPress={handleAdjustPrice}
-                  disabled={loading}
-                >
-                  {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitBtnText}>APPLY DISCOUNT</Text>}
                 </TouchableOpacity>
               </View>
             )}

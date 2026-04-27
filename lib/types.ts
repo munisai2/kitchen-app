@@ -19,6 +19,7 @@ export interface Order {
   status:           OrderStatus
   customerName:     string
   customerPhone:    string
+  customerEmail?:   string
   orderType:        'pickup' | 'dine-in' | 'reservation'
   items:            OrderItem[]
   subtotal:         number

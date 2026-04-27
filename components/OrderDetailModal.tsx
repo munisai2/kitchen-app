@@ -26,7 +26,7 @@ const NEXT_STATUS: Record<string, Order['status']> = {
 }
 
 export function OrderDetailModal({ order, visible, onClose, onStatusUpdate }: OrderDetailModalProps) {
-  const [adjustType, setAdjustType] = useState<'time' | 'price' | 'cancel' | null>(null)
+  const [adjustType, setAdjustType] = useState<'time' | 'cancel' | null>(null)
   const [kitchenMsg, setKitchenMsg] = useState('')
   const [tempTime, setTempTime] = useState(30)
   const [savingTime, setSavingTime] = useState(false)
@@ -112,7 +112,7 @@ export function OrderDetailModal({ order, visible, onClose, onStatusUpdate }: Or
               <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.itemList}>
                 <Text style={styles.panelTitle}>ORDER ITEMS</Text>
                 {order.items?.map((item, i) => (
-                  <TouchableOpacity key={i} style={styles.itemCard} onPress={() => setAdjustType('price')}>
+                  <View key={i} style={styles.itemCard}>
                     <View style={styles.itemMain}>
                       <View style={styles.qtyBox}>
                         <Text style={styles.qtyText}>{item.quantity}</Text>
@@ -120,10 +120,7 @@ export function OrderDetailModal({ order, visible, onClose, onStatusUpdate }: Or
                       <Text style={styles.itemName}>{item.name}</Text>
                       <Text style={styles.itemPrice}>${(item.price * item.quantity).toFixed(2)}</Text>
                     </View>
-                    <View style={styles.itemFooter}>
-                      <Text style={styles.tapToEdit}>Tap to adjust price or report issue</Text>
-                    </View>
-                  </TouchableOpacity>
+                  </View>
                 ))}
 
                 {order.specialRequests ? (

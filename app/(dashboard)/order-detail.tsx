@@ -21,10 +21,13 @@ const NEXT_STATUS: Record<string, Order['status']> = {
 }
 
 const STATUS_COLOR: Record<string, string> = {
-  new:       '#DC2626', // red   — Confirm Order
-  preparing: '#2563EB', // blue  — Mark as Ready
-  ready:     '#16A34A', // green — Complete Order
+  new:       '#EF4444', // Red
+  preparing: '#2563EB', // blue
+  ready:     '#16A34A', // green
 }
+
+// Global cache to persist "draft" adjustments while navigating
+const draftAdjustmentsCache: Record<string, Record<number, { delta: number; reason: string }>> = {}
 
 export default function OrderDetailScreen() {
   const params = useLocalSearchParams<{ id: string }>()
@@ -32,18 +35,37 @@ export default function OrderDetailScreen() {
 
   const order = orders.find(o => o._id === params.id) ?? null
 
-  const [adjustType, setAdjustType] = useState<'time' | 'price' | 'cancel' | null>(null)
+  const [adjustType, setAdjustType] = useState<'time' | 'cancel' | null>(null)
   const [kitchenMsg, setKitchenMsg] = useState('')
   const [tempTime, setTempTime] = useState(30)
   const [savingTime, setSavingTime] = useState(false)
   const [confirmLoading, setConfirmLoading] = useState(false)
+  const [specialAdj, setSpecialAdj] = useState(0)
+
+  // Per-item price adjustment state
+  const [activeItemIdx, setActiveItemIdx] = useState<number | null>(null)
+  const [itemDeltas, setItemDeltas] = useState<Record<number, { delta: number; reason: string }>>({})
+  const [itemDeltaTemp, setItemDeltaTemp] = useState(0)
+  const [itemReasonTemp, setItemReasonTemp] = useState('')
 
   useEffect(() => {
     if (order) {
       setTempTime(order.estimatedTime || 30)
       setKitchenMsg(order.kitchenMessage || '')
+      // Load from cache or reset
+      setActiveItemIdx(null)
+      setItemDeltas(draftAdjustmentsCache[order._id] || {})
+      setItemDeltaTemp(0)
+      setItemReasonTemp('')
     }
   }, [order?._id])
+
+  // Sync deltas to cache whenever they change
+  useEffect(() => {
+    if (order?._id) {
+      draftAdjustmentsCache[order._id] = itemDeltas
+    }
+  }, [itemDeltas, order?._id])
 
   if (!order) {
     return (
@@ -75,9 +97,47 @@ export default function OrderDetailScreen() {
     }
   }
 
+  async function handleCancelOrder() {
+    try {
+      setConfirmLoading(true)
+      // Send cancellation email before status change
+      if (order) {
+        await updateOrderStatus(order._id, 'cancelled', kitchenMsg, {
+          reason: kitchenMsg || 'Order cancelled by restaurant',
+          items: order.items,
+          total: order.total
+        })
+      }
+      router.back()
+    } catch (err) {
+      console.error('[cancel] Failed:', err)
+      showToast('Failed to cancel order', 'error')
+    } finally {
+      setConfirmLoading(false)
+    }
+  }
+
   function safeBack() {
     if (router.canGoBack()) router.back()
     else router.replace('/(dashboard)/kitchen' as any)
+  }
+
+  function openItemAdjust(idx: number) {
+    const existing = itemDeltas[idx]
+    setItemDeltaTemp(existing?.delta ?? 0)
+    setItemReasonTemp(existing?.reason ?? '')
+    setActiveItemIdx(idx)
+  }
+
+  function saveItemAdjust() {
+    if (activeItemIdx === null) return
+    if (itemDeltaTemp !== 0) {
+      setItemDeltas(prev => ({ ...prev, [activeItemIdx]: { delta: itemDeltaTemp, reason: itemReasonTemp } }))
+    } else {
+      // Remove adjustment if delta = 0
+      setItemDeltas(prev => { const n = { ...prev }; delete n[activeItemIdx]; return n })
+    }
+    setActiveItemIdx(null)
   }
 
   async function handleMainAction() {
@@ -91,7 +151,67 @@ export default function OrderDetailScreen() {
         statusToSet = 'completed'
       }
 
-      await updateOrderStatus(order!._id, statusToSet, kitchenMsg)
+      // Apply item price adjustments before confirming/marking ready
+      if ((Object.keys(itemDeltas).length > 0 || specialAdj !== 0) && (order?.status === 'new' || order?.status === 'preparing')) {
+        const adjustedItems = order!.items.map((item, i) => {
+          const adj = itemDeltas[i]
+          return adj ? { ...item, price: Math.max(0, item.price + adj.delta / item.quantity) } : item
+        })
+        const totalDelta = Object.values(itemDeltas).reduce((s, a) => s + a.delta, 0) + specialAdj
+        const originalSubtotal = order!.subtotal || 0
+        const newSubtotal = Math.max(0, originalSubtotal + totalDelta)
+        
+        // Conditional Promo Logic
+        const originalPromo = order!.promoDiscount || 0
+        const isBogo = order!.promoCode?.toUpperCase().includes('BOGO')
+        let newPromo = originalPromo
+
+        if (!isBogo && originalSubtotal > 0) {
+          const promoRatio = originalPromo / originalSubtotal
+          newPromo = parseFloat((newSubtotal * promoRatio).toFixed(2))
+        }
+        
+        // New Logic: Tax on (Subtotal - Promo)
+        const discountedSubtotal = Math.max(0, newSubtotal - newPromo)
+        const newTax = parseFloat((discountedSubtotal * 0.08).toFixed(2))
+        const newTotal = parseFloat((discountedSubtotal + newTax).toFixed(2))
+        
+        const reasons = Object.values(itemDeltas).map(a => a.reason).filter(Boolean).join('; ')
+
+        await client.patch(order!._id).set({
+          items: adjustedItems.map((item, i) => ({
+            _type: 'orderItem',
+            _key: `item-${i}`,
+            name: item.name,
+            quantity: item.quantity,
+            price: item.price,
+          })),
+          subtotal: newSubtotal,
+          tax: newTax,
+          total: newTotal,
+          promoDiscount: newPromo,
+          discountAmount: totalDelta !== 0 ? -totalDelta : undefined,
+          adjustmentReason: reasons || kitchenMsg || 'Price adjusted by kitchen staff',
+        }).commit()
+        
+        // Clear local state and cache immediately to prevent doubling
+        setItemDeltas({})
+        setSpecialAdj(0)
+        delete draftAdjustmentsCache[order!._id]
+
+        // Pass overrides to updateOrderStatus for email notification
+        await updateOrderStatus(order!._id, statusToSet, kitchenMsg, {
+          items: adjustedItems,
+          subtotal: newSubtotal,
+          tax: newTax,
+          total: newTotal,
+          promoDiscount: newPromo,
+          discountAmount: totalDelta !== 0 ? -totalDelta : undefined,
+          adjustmentReason: reasons || kitchenMsg || 'Price adjusted by kitchen staff'
+        })
+      } else {
+        await updateOrderStatus(order!._id, statusToSet, kitchenMsg)
+      }
       
       const labels: Record<string, string> = {
         preparing: 'Order confirmed — now preparing!',
@@ -152,23 +272,114 @@ export default function OrderDetailScreen() {
                 <Text style={styles.panelTitle}>ORDER ITEMS</Text>
               </View>
 
-              {order.items?.map((item, i) => (
-                <TouchableOpacity key={i} style={styles.itemCard} onPress={() => setAdjustType('price')}>
-                  <View style={styles.itemMain}>
-                    <View style={styles.qtyBox}>
-                      <Text style={styles.qtyText}>{item.quantity}</Text>
-                    </View>
-                    <Text style={styles.itemName}>{item.name}</Text>
-                    <Text style={styles.itemPrice}>${(item.price * item.quantity).toFixed(2)}</Text>
+              {order.items?.map((item, i) => {
+                const adj = itemDeltas[i]
+                const adjTotal = adj ? Math.max(0, item.price * item.quantity + adj.delta) : item.price * item.quantity
+                const isOpen = activeItemIdx === i
+                const isIncrease = adj && adj.delta > 0
+                const isDecrease = adj && adj.delta < 0
+
+                return (
+                  <View key={i}>
+                    <TouchableOpacity
+                      style={[styles.itemCard, adj && { borderColor: isDecrease ? '#4ADE80' : '#EF4444' }]}
+                      onPress={() => isOpen ? setActiveItemIdx(null) : openItemAdjust(i)}
+                    >
+                      <View style={styles.itemMain}>
+                        <View style={styles.qtyBox}>
+                          <Text style={styles.qtyText}>{item.quantity}</Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.itemName}>{item.name}</Text>
+                          {adj && (
+                            <Text style={{ color: isDecrease ? '#4ADE80' : '#EF4444', fontSize: 11, fontWeight: '700', marginTop: 2 }}>
+                              {isDecrease ? 'DISCOUNTED' : 'ADD-ON'} {isDecrease ? '' : '+'}${Math.abs(adj.delta).toFixed(2)}
+                            </Text>
+                          )}
+                        </View>
+                        <View style={{ alignItems: 'flex-end' }}>
+                          <Text style={[styles.itemPrice, adj && { textDecorationLine: 'line-through', opacity: 0.4, fontSize: 12 }]}>
+                            ${(item.price * item.quantity).toFixed(2)}
+                          </Text>
+                          {adj && <Text style={{ color: isDecrease ? '#4ADE80' : '#EF4444', fontWeight: '800', fontSize: 15 }}>${adjTotal.toFixed(2)}</Text>}
+                        </View>
+                      </View>
+                      {!isOpen && <Text style={styles.tapToEdit}>{adj ? `✓ Adjusted${adj.reason ? ` — ${adj.reason}` : ''}` : 'Tap to adjust price'}</Text>}
+                    </TouchableOpacity>
+
+                    {/* Inline popup card */}
+                    {isOpen && (
+                      <View style={styles.itemAdjustCard}>
+                        <Text style={styles.itemAdjustTitle}>ADJUST: {item.name}</Text>
+                        <View style={styles.itemAdjustStepper}>
+                          <TouchableOpacity style={styles.stepBtn} onPress={() => setItemDeltaTemp(d => parseFloat((d - 0.5).toFixed(2)))}>
+                            <Text style={styles.stepBtnText}>−</Text>
+                          </TouchableOpacity>
+                          <View style={{ alignItems: 'center', flex: 1 }}>
+                            <TextInput
+                              style={[styles.stepValue, { color: itemDeltaTemp < 0 ? '#4ADE80' : itemDeltaTemp > 0 ? '#EF4444' : theme.colors.gold.DEFAULT, width: '100%', textAlign: 'center' }]}
+                              keyboardType="numeric"
+                              value={Math.abs(itemDeltaTemp).toFixed(2)}
+                              onChangeText={(val) => {
+                                const cents = parseInt(val.replace(/[^0-9]/g, '')) || 0
+                                const sign = itemDeltaTemp < 0 ? -1 : 1
+                                setItemDeltaTemp((cents / 100) * sign)
+                              }}
+                            />
+                            <Text style={{ color: theme.colors.cream.muted, fontSize: 11 }}>Add/Sub: ${itemDeltaTemp.toFixed(2)}</Text>
+                          </View>
+                          <TouchableOpacity style={styles.stepBtn} onPress={() => setItemDeltaTemp(d => parseFloat((d + 0.5).toFixed(2)))}>
+                            <Text style={styles.stepBtnText}>+</Text>
+                          </TouchableOpacity>
+                        </View>
+                        <TextInput
+                          style={styles.itemAdjustReason}
+                          placeholder="Reason (optional)"
+                          placeholderTextColor={theme.colors.cream.muted}
+                          value={itemReasonTemp}
+                          onChangeText={setItemReasonTemp}
+                        />
+                        <View style={{ flexDirection: 'row', gap: 8 }}>
+                          <TouchableOpacity style={[styles.itemAdjustBtn, { flex: 1, backgroundColor: theme.colors.palace.stone }]} onPress={() => setActiveItemIdx(null)}>
+                            <Text style={{ color: theme.colors.cream.muted, fontWeight: '700', fontSize: 13 }}>CANCEL</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={[styles.itemAdjustBtn, { flex: 2 }]} onPress={saveItemAdjust}>
+                            <Text style={{ color: theme.colors.palace.black, fontWeight: '900', fontSize: 13 }}>APPLY</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    )}
                   </View>
-                  <Text style={styles.tapToEdit}>Tap to adjust price</Text>
-                </TouchableOpacity>
-              ))}
+                )
+              })}
 
               {order.specialRequests ? (
                 <View style={styles.specialBox}>
-                  <Text style={styles.specialTitle}>⚠️ SPECIAL REQUESTS</Text>
-                  <Text style={styles.specialText}>{order.specialRequests}</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.specialTitle}>⚠️ SPECIAL REQUESTS</Text>
+                    <Text style={styles.specialText}>{order.specialRequests}</Text>
+                  </View>
+                  {(order.status === 'new' || order.status === 'preparing') && (
+                    <View style={styles.specialStepper}>
+                      <TouchableOpacity style={styles.miniStepBtn} onPress={() => setSpecialAdj(s => parseFloat((s - 0.5).toFixed(2)))}>
+                        <Text style={styles.miniStepBtnText}>−</Text>
+                      </TouchableOpacity>
+                      <TextInput
+                        style={[styles.miniStepVal, { color: specialAdj < 0 ? '#4ADE80' : specialAdj > 0 ? '#EF4444' : theme.colors.cream.DEFAULT }]}
+                        keyboardType="numeric"
+                        value={Math.abs(specialAdj).toFixed(2)}
+                        onChangeText={(val) => {
+                          const cents = parseInt(val.replace(/[^0-9]/g, '')) || 0
+                          const sign = specialAdj < 0 ? -1 : 1
+                          setSpecialAdj((cents / 100) * sign)
+                        }}
+                        selectTextOnFocus
+                      />
+                      <TouchableOpacity style={styles.miniStepBtn} onPress={() => setSpecialAdj(s => parseFloat((s + 0.5).toFixed(2)))}>
+                        <Text style={styles.miniStepBtnText}>+</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
                 </View>
               ) : null}
             </ScrollView>
@@ -232,33 +443,76 @@ export default function OrderDetailScreen() {
               </View>
 
               {/* Payment */}
-              <View style={styles.summaryCard}>
-                <Text style={styles.cardLabel}>PAYMENT</Text>
-                <View style={styles.priceRow}>
-                  <Text style={styles.priceLabel}>Subtotal</Text>
-                  <Text style={styles.priceVal}>${order.subtotal?.toFixed(2)}</Text>
-                </View>
-                <View style={styles.priceRow}>
-                  <Text style={styles.priceLabel}>Tax</Text>
-                  <Text style={styles.priceVal}>${order.tax?.toFixed(2)}</Text>
-                </View>
-                {order.discountAmount ? (
-                  <View style={styles.priceRow}>
-                    <Text style={[styles.priceLabel, { color: theme.colors.gold.DEFAULT }]}>Discount</Text>
-                    <Text style={[styles.priceVal, { color: theme.colors.gold.DEFAULT }]}>−${order.discountAmount.toFixed(2)}</Text>
+              {(() => {
+                const totalDelta = Object.values(itemDeltas).reduce((s, a) => s + a.delta, 0) + specialAdj
+                const promo = order.promoDiscount || 0
+                
+                // For confirmed orders, discountAmount in Sanity represents the historical delta
+                const historicalDelta = order.status !== 'new' ? -(order.discountAmount || 0) : 0
+                const currentDelta = totalDelta || historicalDelta
+                
+                const originalSubtotal = (order.status === 'new' || !order.discountAmount) ? (order.subtotal || 0) : (order.subtotal || 0) - historicalDelta
+                const projectedSubtotal = Math.max(0, originalSubtotal + currentDelta)
+                
+                // Fixed Promo Calculation: We must NOT double-recalculate if the promo was already adjusted in Sanity
+                // If status is not 'new', order.promoDiscount IS the already-adjusted promo.
+                const originalPromo = (order.status === 'new') ? (order.promoDiscount || 0) : (order.promoDiscount || 0)
+                const isBogo = order.promoCode?.toUpperCase().includes('BOGO')
+                
+                let dynamicPromo = originalPromo
+                if (!isBogo && originalSubtotal > 0 && order.status === 'new') {
+                  // Only recalculate ratio against original subtotal when in 'new'
+                  const promoRatio = originalPromo / originalSubtotal
+                  dynamicPromo = parseFloat((projectedSubtotal * promoRatio).toFixed(2))
+                } else if (!isBogo && order.status !== 'new' && totalDelta !== 0) {
+                  // If in Preparing/Ready and we have a NEW local delta, scale from the CURRENT promo/subtotal
+                  const promoRatio = (order.promoDiscount || 0) / (order.subtotal || 1)
+                  dynamicPromo = parseFloat((projectedSubtotal * promoRatio).toFixed(2))
+                }
+                
+                const discountedSubtotal = Math.max(0, projectedSubtotal - dynamicPromo)
+                const projectedTax = parseFloat((discountedSubtotal * 0.08).toFixed(2))
+                const projectedTotal = parseFloat((discountedSubtotal + projectedTax).toFixed(2))
+
+                return (
+                  <View style={styles.summaryCard}>
+                    <Text style={styles.cardLabel}>PAYMENT SUMMARY</Text>
+                    
+                    <View style={styles.priceRow}>
+                      <Text style={styles.priceLabel}>Original Subtotal</Text>
+                      <Text style={styles.priceVal}>${originalSubtotal.toFixed(2)}</Text>
+                    </View>
+
+                    {currentDelta !== 0 && (
+                      <View style={styles.priceRow}>
+                        <Text style={[styles.priceLabel, { color: currentDelta < 0 ? '#4ADE80' : '#EF4444' }]}>
+                          Kitchen Adjustment
+                        </Text>
+                        <Text style={[styles.priceVal, { color: currentDelta < 0 ? '#4ADE80' : '#EF4444' }]}>
+                          ({currentDelta < 0 ? '−' : '+'}$${Math.abs(currentDelta).toFixed(2)})
+                        </Text>
+                      </View>
+                    )}
+
+                    {dynamicPromo > 0 && (
+                      <View style={styles.priceRow}>
+                        <Text style={[styles.priceLabel, { color: '#4ADE80' }]}>Promo ({order.promoCode})</Text>
+                        <Text style={[styles.priceVal, { color: '#4ADE80' }]}>−${dynamicPromo.toFixed(2)}</Text>
+                      </View>
+                    )}
+
+                    <View style={styles.priceRow}>
+                      <Text style={styles.priceLabel}>Tax (8% of ${discountedSubtotal.toFixed(2)})</Text>
+                      <Text style={styles.priceVal}>${projectedTax.toFixed(2)}</Text>
+                    </View>
+
+                    <View style={[styles.priceRow, styles.totalRow]}>
+                      <Text style={styles.totalLabel}>FINAL TOTAL</Text>
+                      <Text style={styles.totalVal}>${projectedTotal.toFixed(2)}</Text>
+                    </View>
                   </View>
-                ) : null}
-                {order.promoDiscount ? (
-                  <View style={styles.priceRow}>
-                    <Text style={[styles.priceLabel, { color: '#4ADE80' }]}>Promo ({order.promoCode})</Text>
-                    <Text style={[styles.priceVal, { color: '#4ADE80' }]}>−${order.promoDiscount.toFixed(2)}</Text>
-                  </View>
-                ) : null}
-                <View style={[styles.priceRow, styles.totalRow]}>
-                  <Text style={styles.totalLabel}>TOTAL</Text>
-                  <Text style={styles.totalVal}>${order.total?.toFixed(2)}</Text>
-                </View>
-              </View>
+                )
+              })()}
 
               {/* Message */}
               <View style={styles.messageBox}>
@@ -303,6 +557,7 @@ export default function OrderDetailScreen() {
       <AdjustmentSheets
         type={adjustType}
         order={order}
+        updateOrderStatus={updateOrderStatus}
         onClose={() => setAdjustType(null)}
         onSuccess={() => {
           setAdjustType(null)
@@ -384,11 +639,65 @@ const styles = StyleSheet.create({
     padding: 16, marginBottom: 12, borderWidth: 1, borderColor: theme.colors.palace.stone,
   },
   itemMain: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  miniStepBtnText: {
+    color: '#C9A84C',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  miniStepVal: {
+    fontSize: 14,
+    fontWeight: '700',
+    minWidth: 40,
+    textAlign: 'center',
+    padding: 0,
+  },
+  specialStepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginLeft: 10,
+  },
+  miniStepBtn: {
+    padding: 5,
+  },
   qtyBox: { width: 36, height: 36, borderRadius: 8, backgroundColor: theme.colors.gold.DEFAULT, alignItems: 'center', justifyContent: 'center' },
   qtyText: { color: theme.colors.palace.black, fontSize: 16, fontWeight: '900' },
   itemName: { flex: 1, color: theme.colors.cream.DEFAULT, fontSize: 18, fontWeight: '600' },
   itemPrice: { color: theme.colors.cream.muted, fontSize: 15 },
   tapToEdit: { color: theme.colors.gold.muted, fontSize: 11, fontStyle: 'italic', marginTop: 8 },
+
+  // Per-item adjust card
+  itemAdjustCard: {
+    backgroundColor: theme.colors.palace.smoke,
+    borderRadius: 10, borderWidth: 1,
+    borderColor: theme.colors.gold.DEFAULT,
+    padding: 14, marginBottom: 12, gap: 12,
+  },
+  itemAdjustTitle: { color: theme.colors.gold.DEFAULT, fontSize: 11, fontWeight: '800', letterSpacing: 1 },
+  itemAdjustStepper: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: theme.colors.palace.black,
+    borderRadius: 8, padding: 8, gap: 8,
+  },
+  stepBtn: {
+    width: 40, height: 40, borderRadius: 8,
+    backgroundColor: theme.colors.palace.stone,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  stepBtnText: { color: theme.colors.cream.DEFAULT, fontSize: 22, fontWeight: '700', lineHeight: 26 },
+  stepValue: { fontSize: 22, fontWeight: '900', color: theme.colors.gold.DEFAULT },
+  itemAdjustReason: {
+    backgroundColor: theme.colors.palace.black, color: theme.colors.cream.DEFAULT,
+    borderRadius: 8, padding: 10, fontSize: 13,
+    borderWidth: 1, borderColor: theme.colors.palace.stone,
+  },
+  itemAdjustBtn: {
+    backgroundColor: theme.colors.gold.DEFAULT,
+    borderRadius: 8, paddingVertical: 10, alignItems: 'center',
+  },
   specialBox: { backgroundColor: '#F59E0B15', borderRadius: 10, padding: 16, marginTop: 8, borderLeftWidth: 4, borderLeftColor: '#F59E0B' },
   specialTitle: { color: '#F59E0B', fontSize: 13, fontWeight: '900', marginBottom: 6 },
   specialText: { color: '#FEF3C7', fontSize: 18, fontWeight: '600', lineHeight: 26 },

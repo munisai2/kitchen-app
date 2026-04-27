@@ -5,7 +5,8 @@ import { restaurantInfoQuery } from '../lib/queries'
 import { theme } from '../constants/theme'
 import { showToast } from './Toast'
 import { Order } from '../lib/types'
-import { sendOrderSMS } from '../lib/sms'
+import { sendOrderEmail } from '../lib/notifications'
+import { useRestaurantStore } from '../lib/store/restaurantStore'
 
 type Status = 'open' | 'busy' | 'paused'
 
@@ -113,7 +114,7 @@ export function StatusControl({ orders, onStatusChange }: { orders: Order[], onS
         o.items?.some(item => selectedCategories.includes((item as any).category || 'General'))
       )
 
-      // 2. Patch each order + Send SMS
+      // 2. Patch each order + Send email
       await Promise.all(ordersToUpdate.map(async (order) => {
         const currentEst = order.estimatedTime || 30
         const newEst = currentEst + extra
@@ -123,13 +124,15 @@ export function StatusControl({ orders, onStatusChange }: { orders: Order[], onS
           busyTimeAdded: extra
         }).commit()
 
-        await sendOrderSMS({
-          to: order.customerPhone,
+        await sendOrderEmail({
+          customerEmail: order.customerEmail,
+          customerPhone: order.customerPhone,
           type: 'adjusted_time',
           data: {
             orderId: order.orderId,
             customerName: order.customerName,
-            extraMinutes: extra
+            estimatedTime: newEst,
+            logoUrl: useRestaurantStore.getState().logoUrl,
           }
         })
       }))
@@ -219,7 +222,7 @@ export function StatusControl({ orders, onStatusChange }: { orders: Order[], onS
             </View>
 
             <Text style={styles.previewText}>
-              Will add {extraMinutes} min to {affectedOrdersCount} orders and notify customers by SMS
+              Will add {extraMinutes} min to {affectedOrdersCount} orders and notify customers by email
             </Text>
 
             <View style={styles.modalFooter}>

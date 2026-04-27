@@ -2,7 +2,7 @@
 export const activeOrdersQuery = `
   *[_type == "order" && (status in ["new","preparing","ready"] || (status == "scheduled" && (scheduledTime != null || reservationTime != null)))]
   | order(placedAt desc) {
-    _id, orderId, status, customerName, customerPhone,
+    _id, orderId, status, customerName, customerPhone, customerEmail,
     orderType, items, subtotal, tax, total, discountAmount,
     specialRequests, placedAt, notes, scheduledTime, estimatedTime,
     tableNumber, guestCount, reservationTime, promoCode, promoDiscount
@@ -13,7 +13,7 @@ export const activeOrdersQuery = `
 export const ordersHistoryQuery = (limit: number) => `
   *[_type == "order" && status in ["completed","cancelled"]]
   | order(placedAt desc) [0...${limit}] {
-    _id, orderId, status, customerName, customerPhone,
+    _id, orderId, status, customerName, customerPhone, customerEmail,
     orderType, items, subtotal, tax, total,
     specialRequests, placedAt
   }
@@ -48,7 +48,8 @@ export const restaurantInfoQuery = `
     _id,
     restaurantStatus,
     openingHours,
-    phone
+    phone,
+    logo { asset->{ url } }
   }
 `
 
