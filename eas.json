@@ -3,25 +3,11 @@
     "preview": {
       "android": {
         "buildType": "apk"
-      },
-      "env": {
-        "EXPO_PUBLIC_SANITY_PROJECT_ID": "c020lahr",
-        "EXPO_PUBLIC_SANITY_DATASET": "production",
-        "EXPO_PUBLIC_SANITY_API_VERSION": "2024-01-01",
-        "EXPO_PUBLIC_WEBSITE_URL": "https://qasrafghan.com",
-        "EXPO_PUBLIC_SANITY_TOKEN": "skrfEidVmDHS1cdtDquxVpOamClj23GtIgb6ZoAlBOummZe3H47LOKwhfMVFmVGARzSOZPH1sgPX2sAizSHfVZxwPBNFEJE9C8vRn9WzoaUpOvCy97Ik7udSszhsu6ZfDkCwpjPz97nuOHYOTbeAarseU5cFz2pXAtRetqmiCJW8V0NlJTQG"
       }
     },
     "production": {
       "android": {
         "buildType": "apk"
-      },
-      "env": {
-        "EXPO_PUBLIC_SANITY_PROJECT_ID": "c020lahr",
-        "EXPO_PUBLIC_SANITY_DATASET": "production",
-        "EXPO_PUBLIC_SANITY_API_VERSION": "2024-01-01",
-        "EXPO_PUBLIC_WEBSITE_URL": "https://qasrafghan.com",
-        "EXPO_PUBLIC_SANITY_TOKEN": "skrfEidVmDHS1cdtDquxVpOamClj23GtIgb6ZoAlBOummZe3H47LOKwhfMVFmVGARzSOZPH1sgPX2sAizSHfVZxwPBNFEJE9C8vRn9WzoaUpOvCy97Ik7udSszhsu6ZfDkCwpjPz97nuOHYOTbeAarseU5cFz2pXAtRetqmiCJW8V0NlJTQG"
       }
     }
   },
