@@ -167,15 +167,19 @@ export default function SettingsScreen() {
           </TouchableOpacity>
 
           <TouchableOpacity style={styles.actionBtn} onPress={async () => {
-            const result = await pickAndSaveCustomAlarm()
-            if (result.success) {
-              showToast('Custom alarm saved!', 'success')
-              if (settings) {
-                await client.patch(settings._id).set({ useCustomAlarm: true }).commit()
-                setSettings({ ...settings, useCustomAlarm: true })
+            try {
+              const result = await pickAndSaveCustomAlarm()
+              if (result.success) {
+                Alert.alert('Success', 'Custom alarm saved successfully!')
+                if (settings) {
+                  await client.patch(settings._id).set({ useCustomAlarm: true }).commit()
+                  setSettings({ ...settings, useCustomAlarm: true })
+                }
+              } else {
+                Alert.alert('Upload Failed', `Reason: ${result.error || 'Unknown'}`)
               }
-            } else if (result.error !== 'Cancelled') {
-              showToast(result.error || 'Failed to upload', 'error')
+            } catch (err: any) {
+              Alert.alert('Critical Crash', `Error: ${err?.message || 'Unknown'}`)
             }
           }}>
             <Text style={styles.actionBtnText}>📁  Upload Custom Alarm from Tablet</Text>

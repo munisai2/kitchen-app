@@ -4,7 +4,8 @@
 
 import { Audio }          from 'expo-av'
 import * as DocumentPicker from 'expo-document-picker'
-import * as FileSystem     from 'expo-file-system'
+import * as FileSystem     from 'expo-file-system/legacy'
+import { Alert } from 'react-native'
 
 // ── CONSTANTS ──────────────────────────────────────────
 
@@ -170,12 +171,16 @@ export async function pickAndSaveCustomAlarm():
       }
     }
 
+    Alert.alert('Debug: File Picked', `URI: ${pickedFile.uri}\nSize: ${pickedFile.size}`)
+
     // Copy to app's permanent document directory
     // This survives app updates and cache clears
     await FileSystem.copyAsync({
       from: pickedFile.uri,
       to:   CUSTOM_ALARM_PATH,
     })
+
+    Alert.alert('Debug', 'File copied successfully!')
 
     // Verify the copy succeeded
     const info = await FileSystem.getInfoAsync(CUSTOM_ALARM_PATH)
