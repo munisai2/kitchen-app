@@ -120,6 +120,14 @@ export function useOrders() {
 
 
   async function updateOrderStatus(orderId: string, newStatus: Order['status'], kitchenMsg?: string, overrideData?: any) {
+    // Optimistic UI Update: Instantly change the screen to feel lightning fast
+    setOrders(prev => {
+      if (newStatus === 'completed' || newStatus === 'cancelled') {
+        return prev.filter(o => o._id !== orderId)
+      }
+      return prev.map(o => o._id === orderId ? { ...o, status: newStatus, kitchenMessage: kitchenMsg, ...overrideData } : o)
+    })
+
     try {
       const updateObj: any = { status: newStatus }
       if (kitchenMsg !== undefined) updateObj.kitchenMessage = kitchenMsg
@@ -133,11 +141,6 @@ export function useOrders() {
         if (remaining.length === 0) {
           await stopAlarm()
         }
-      }
-
-      // Remove from active list when completed/cancelled
-      if (newStatus === 'completed' || newStatus === 'cancelled') {
-        setOrders(prev => prev.filter(o => o._id !== orderId))
       }
 
       // Email Notifications
@@ -263,6 +266,7 @@ export function useOrders() {
       }
     } catch (err) {
       console.error('[orders] Update failed:', err)
+      fetchOrders(false) // Rollback optimistic update if Sanity fails
       throw err
     }
   }
