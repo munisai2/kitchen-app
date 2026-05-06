@@ -34,9 +34,9 @@ export default function KitchenScreen() {
   const schedOrders= orders.filter(o => o.status === 'scheduled')
   const newestPending = newOrders[0]
 
-  async function handleStatusUpdate(orderId: string, status: Order['status'], message?: string) {
+  async function handleStatusUpdate(orderId: string, status: Order['status'], message?: string, overrideData?: any) {
     try {
-      await updateOrderStatus(orderId, status, message)
+      await updateOrderStatus(orderId, status, message, overrideData)
       const labels: Record<string, string> = {
         preparing: 'Order accepted — now preparing',
         ready:     'Order marked as ready!',

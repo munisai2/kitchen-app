@@ -12,32 +12,42 @@ import { showToast } from './Toast'
 interface AdjustmentSheetsProps {
   type: 'time' | 'cancel' | null
   order: Order
-  updateOrderStatus: (orderId: string, newStatus: Order['status'], kitchenMsg?: string, overrideData?: any) => Promise<void>
+  updateOrderStatus: (orderId: string, newStatus: Order['status'], kitchenMsg?: string, overrideData?: any) => Promise<void> | void
   onClose: () => void
   onSuccess: () => void
+  initialMessage?: string
 }
 
-export function AdjustmentSheets({ type, order, updateOrderStatus, onClose, onSuccess }: AdjustmentSheetsProps) {
+export function AdjustmentSheets({ type, order, updateOrderStatus, onClose, onSuccess, initialMessage = '' }: AdjustmentSheetsProps) {
   const [loading, setLoading] = useState(false)
   const [value, setValue] = useState('')
   const [reason, setReason] = useState('')
   const [tempTime, setTempTime] = useState(order.estimatedTime || 30)
-  const [message, setMessage] = useState('')
+  const [message, setMessage] = useState(initialMessage)
   // Price adjustment: tracks delta from original total (negative = discount, positive = surcharge)
   const [priceDelta, setPriceDelta] = useState(0)
 
   if (!type) return null
+
+  // Sync message when initialMessage changes (when modal opens)
+  React.useEffect(() => {
+    setMessage(initialMessage)
+  }, [initialMessage, type])
 
   async function handleAdjustTime() {
     try {
       setLoading(true)
       // Update in Sanity
       await client.patch(order._id)
-        .set({ estimatedTime: tempTime, adjustmentReason: 'Time adjusted by kitchen' })
+        .set({ 
+          estimatedTime: tempTime, 
+          kitchenMessage: message.trim() || undefined,
+          adjustmentReason: 'Time adjusted by kitchen' 
+        })
         .commit()
 
       // Trigger email notification
-      await updateOrderStatus(order._id, order.status, 'Time adjusted by kitchen', {
+      await updateOrderStatus(order._id, order.status, message.trim() || 'Time adjusted by kitchen', {
         estimatedTime: tempTime
       })
 
@@ -64,9 +74,16 @@ export function AdjustmentSheets({ type, order, updateOrderStatus, onClose, onSu
         .set({
           discountAmount: discountAmount || undefined,
           total: newTotal,
+          kitchenMessage: message.trim() || undefined,
           adjustmentReason: reason || (priceDelta < 0 ? 'Discount applied by staff' : 'Price adjustment by staff')
         })
         .commit()
+
+      // Trigger notification
+      await updateOrderStatus(order._id, order.status, message.trim(), {
+        newTotal,
+        reason: reason || (priceDelta < 0 ? 'Discount applied by staff' : 'Price adjustment by staff')
+      })
 
       showToast(`Price updated to $${newTotal.toFixed(2)}`, 'success')
       onSuccess()

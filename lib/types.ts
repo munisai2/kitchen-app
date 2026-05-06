@@ -58,6 +58,7 @@ export interface KitchenSettings {
   ownerPin:     string
   alarmEnabled: boolean
   alarmVolume:  number
+  useCustomAlarm: boolean
 }
 
 export interface OpeningHours {

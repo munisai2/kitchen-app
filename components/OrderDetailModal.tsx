@@ -16,7 +16,7 @@ interface OrderDetailModalProps {
   order: Order | null
   visible: boolean
   onClose: () => void
-  onStatusUpdate: (id: string, status: Order['status'], message?: string) => void
+  onStatusUpdate: (id: string, status: Order['status'], message?: string, overrideData?: any) => Promise<void> | void
 }
 
 const NEXT_STATUS: Record<string, Order['status']> = {
@@ -175,16 +175,19 @@ export function OrderDetailModal({ order, visible, onClose, onStatusUpdate }: Or
 
                   {/* Messaging */}
                   <View style={styles.messageBox}>
-                    <Text style={styles.cardLabel}>MESSAGE TO CUSTOMER</Text>
+                    <Text style={styles.cardLabel}>MESSAGE TO CUSTOMER (OPTIONAL)</Text>
                     <TextInput
                       style={styles.messageInput}
-                      placeholder="e.g. Preparing your food now! It will be ready in 15 mins."
-                      placeholderTextColor={theme.colors.cream.muted}
+                      placeholder="e.g. No apple juice — replaced with water"
+                      placeholderTextColor="rgba(240,230,200,0.2)"
                       multiline
+                      numberOfLines={2}
                       value={kitchenMsg}
                       onChangeText={setKitchenMsg}
                     />
-                    <Text style={styles.msgHint}>This message appears on their order tracking page.</Text>
+                    <Text style={styles.msgHint}>
+                      This message is sent to the customer when you notify them about their order.
+                    </Text>
                   </View>
 
                 </ScrollView>
@@ -217,7 +220,9 @@ export function OrderDetailModal({ order, visible, onClose, onStatusUpdate }: Or
         <AdjustmentSheets
           type={adjustType}
           order={order}
+          updateOrderStatus={onStatusUpdate}
           onClose={() => setAdjustType(null)}
+          initialMessage={kitchenMsg}
           onSuccess={() => {
             setAdjustType(null)
             onClose()

@@ -5,10 +5,24 @@ import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { useEffect } from 'react'
 import { activateKeepAwakeAsync } from 'expo-keep-awake'
 import { StatusBar } from 'expo-status-bar'
+import { 
+  setCustomAlarmPath, 
+  customAlarmExists,
+  CUSTOM_ALARM_PATH 
+} from '../lib/sound'
 
 export default function RootLayout() {
   useEffect(() => {
     activateKeepAwakeAsync()
+
+    async function restoreAlarmPath() {
+      const exists = await customAlarmExists()
+      if (exists) {
+        setCustomAlarmPath(CUSTOM_ALARM_PATH)
+        console.log('[alarm] Custom alarm restored on startup')
+      }
+    }
+    restoreAlarmPath()
   }, [])
 
   return (

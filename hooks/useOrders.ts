@@ -4,7 +4,7 @@ import { client } from '../lib/sanity'
 import { activeOrdersQuery } from '../lib/queries'
 import { Order } from '../lib/types'
 import { useAlarmStore } from '../lib/store/alarmStore'
-import { stopAlarm, playBeep } from '../lib/sound'
+import { stopAlarm } from '../lib/sound'
 import { sendOrderEmail } from '../lib/notifications'
 import { showToast } from '../components/Toast'
 import { restaurantInfoQuery } from '../lib/queries'
@@ -19,12 +19,28 @@ export function useOrders() {
   const alreadyAlerted                = useRef<Set<string>>(new Set())
   const { startAlarm: startAlarmStore, stopAlarm: stopAlarmStore, pendingOrders } = useAlarmStore()
 
-  const fetchOrders = useCallback(async () => {
+  const fetchOrders = useCallback(async (isInitial = false) => {
     try {
       const data = await client.fetch<Order[]>(activeOrdersQuery)
+      
+      if (isInitial) {
+        // Initial load: Mark all existing orders as known — no alarm for pre-existing orders
+        data.forEach(o => knownOrderIds.current.add(o._id))
+      } else {
+        // Polling update: Detect genuinely new orders and trigger alarm
+        data.forEach(order => {
+          const isNewOrder = 
+            !knownOrderIds.current.has(order._id) && 
+            (order.status === 'new' || order.status === 'scheduled')
+            
+          if (isNewOrder) {
+            knownOrderIds.current.add(order._id)
+            startAlarmStore(order._id)
+          }
+        })
+      }
+      
       setOrders(data)
-      // Mark all existing orders as known — no alarm for pre-existing orders
-      data.forEach(o => knownOrderIds.current.add(o._id))
 
       // Fetch logo URL for emails
       const restInfo = await client.fetch(restaurantInfoQuery)
@@ -40,50 +56,20 @@ export function useOrders() {
       setLoading(false)
       setIsConnected(false)
     }
-  }, [])
+  }, [startAlarmStore])
 
-  // Initial fetch
+  // Initial fetch and continuous polling (replaces unstable Sanity listener)
   useEffect(() => {
-    fetchOrders()
+    fetchOrders(true) // Initial fetch
+    
+    const intervalId = setInterval(() => {
+      fetchOrders(false) // Subsequent polls
+    }, 5000)
+    
+    return () => clearInterval(intervalId)
   }, [fetchOrders])
 
-  // Real-time listener
-  useEffect(() => {
-    const subscription = client
-      .listen(
-        '*[_type == "order" && (status in ["new","preparing","ready"] || (status == "scheduled" && (scheduledTime != null || reservationTime != null)))]',
-        {},
-        { visibility: 'query', events: ['mutation'] }
-      )
-      .subscribe({
-        next: (update) => {
-          setIsConnected(true)
-          if (!update.result) return
 
-          const updatedOrder = update.result as unknown as Order
-          const isNewOrder =
-            !knownOrderIds.current.has(updatedOrder._id) &&
-            (updatedOrder.status === 'new' || updatedOrder.status === 'scheduled')
-
-          if (isNewOrder) {
-            knownOrderIds.current.add(updatedOrder._id)
-            startAlarmStore(updatedOrder._id)
-            setOrders(prev => [updatedOrder, ...prev])
-          } else {
-            setOrders(prev =>
-              prev
-                .map(o => (o._id === updatedOrder._id ? updatedOrder : o))
-                .filter(o => ['new', 'preparing', 'ready', 'scheduled'].includes(o.status))
-            )
-          }
-        },
-        error: () => {
-          setIsConnected(false)
-        },
-      })
-
-    return () => subscription.unsubscribe()
-  }, [fetchOrders, startAlarmStore])
 
   // Scheduled Activation Timer (checks every 60s)
   useEffect(() => {
@@ -131,16 +117,9 @@ export function useOrders() {
     return () => clearInterval(id)
   }, [orders, startAlarmStore])
 
-  // Safety Fallback: Poll every 10s if listener is offline
-  useEffect(() => {
-    if (isConnected) return
-    const id = setInterval(() => {
-      fetchOrders()
-    }, 10000)
-    return () => clearInterval(id)
-  }, [isConnected, fetchOrders])
 
-  async function updateOrderStatus(orderId: string, newStatus: Order['status'], kitchenMsg?: string, overrideData?: Partial<Order>) {
+
+  async function updateOrderStatus(orderId: string, newStatus: Order['status'], kitchenMsg?: string, overrideData?: any) {
     try {
       const updateObj: any = { status: newStatus }
       if (kitchenMsg !== undefined) updateObj.kitchenMessage = kitchenMsg
@@ -162,13 +141,11 @@ export function useOrders() {
       }
 
       // Email Notifications
-      let order = orders.find(o => o._id === orderId)
-      if (!order) return
+      const baseOrder = orders.find(o => o._id === orderId)
+      if (!baseOrder) return
 
       // Merge override data for notification (if provided)
-      if (overrideData) {
-        order = { ...order, ...overrideData }
-      }
+      const order = overrideData ? { ...baseOrder, ...overrideData } : baseOrder
 
       const logoUrl = useRestaurantStore.getState().logoUrl
 
@@ -246,6 +223,40 @@ export function useOrders() {
             reason: (overrideData as any)?.reason || kitchenMsg || 'Order cancelled by restaurant',
             items: order.items,
             total: order.total,
+            kitchenMessage: kitchenMsg,
+            logoUrl
+          }
+        })
+      }
+
+      // 4. ADJUSTED TIME
+      if ((overrideData as any)?.estimatedTime && newStatus === order.status) {
+        sendOrderEmail({
+          customerEmail: order.customerEmail,
+          customerPhone: order.customerPhone,
+          type: 'adjusted_time',
+          data: {
+            orderId: order.orderId,
+            customerName: order.customerName,
+            estimatedTime: (overrideData as any).estimatedTime,
+            kitchenMessage: kitchenMsg,
+            logoUrl
+          }
+        })
+      }
+
+      // 5. ADJUSTED PRICE
+      if ((overrideData as any)?.newTotal !== undefined && newStatus === order.status) {
+        sendOrderEmail({
+          customerEmail: order.customerEmail,
+          customerPhone: order.customerPhone,
+          type: 'adjusted_price',
+          data: {
+            orderId: order.orderId,
+            customerName: order.customerName,
+            newTotal: (overrideData as any).newTotal,
+            reason: (overrideData as any).reason,
+            kitchenMessage: kitchenMsg,
             logoUrl
           }
         })

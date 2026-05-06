@@ -5,7 +5,8 @@ export const activeOrdersQuery = `
     _id, orderId, status, customerName, customerPhone, customerEmail,
     orderType, items, subtotal, tax, total, discountAmount,
     specialRequests, placedAt, notes, scheduledTime, estimatedTime,
-    tableNumber, guestCount, reservationTime, promoCode, promoDiscount
+    tableNumber, guestCount, reservationTime, promoCode, promoDiscount,
+    kitchenMessage
   }
 `
 
@@ -15,7 +16,7 @@ export const ordersHistoryQuery = (limit: number) => `
   | order(placedAt desc) [0...${limit}] {
     _id, orderId, status, customerName, customerPhone, customerEmail,
     orderType, items, subtotal, tax, total,
-    specialRequests, placedAt
+    specialRequests, placedAt, kitchenMessage
   }
 `
 
@@ -38,7 +39,7 @@ export const menuItemsQuery = `
 export const kitchenSettingsQuery = `
   *[_type == "kitchenSettings"][0] {
     _id, chefPin, cashierPin, managerPin, ownerPin,
-    alarmEnabled, alarmVolume
+    alarmEnabled, alarmVolume, useCustomAlarm
   }
 `
 
@@ -52,4 +53,3 @@ export const restaurantInfoQuery = `
     logo { asset->{ url } }
   }
 `
-

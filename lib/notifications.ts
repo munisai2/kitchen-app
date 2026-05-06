@@ -81,6 +81,7 @@ export async function sendOrderEmail(payload: NotificationPayload): Promise<void
           type:           'time',
           newValue:       data.estimatedTime,
           logoUrl:        data.logoUrl,
+          kitchenMessage: data.kitchenMessage,
         };
         break;
 
@@ -94,6 +95,7 @@ export async function sendOrderEmail(payload: NotificationPayload): Promise<void
           newValue:       data.newTotal,
           reason:         data.reason,
           logoUrl:        data.logoUrl,
+          kitchenMessage: data.kitchenMessage,
         };
         break;
 
@@ -123,6 +125,7 @@ export async function sendOrderEmail(payload: NotificationPayload): Promise<void
           type:           'reservation_reminder',
           newValue:       data.formattedTime || data.scheduledTime,
           logoUrl:        data.logoUrl,
+          kitchenMessage: data.kitchenMessage,
         };
         break;
 
@@ -136,6 +139,7 @@ export async function sendOrderEmail(payload: NotificationPayload): Promise<void
           items:        data.items || [],
           total:        data.total || 0,
           logoUrl:      data.logoUrl,
+          kitchenMessage: data.kitchenMessage,
         };
         break;
 

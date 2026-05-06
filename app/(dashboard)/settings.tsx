@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Switch, TextInput, Modal, ActivityIndicator,
+  Switch, TextInput, Modal, ActivityIndicator, Alert,
 } from 'react-native'
 import Slider from '@react-native-community/slider'
 import { router } from 'expo-router'
@@ -9,7 +9,13 @@ import { client } from '../../lib/sanity'
 import { kitchenSettingsQuery } from '../../lib/queries'
 import { KitchenSettings, UserRole } from '../../lib/types'
 import { useAuthStore } from '../../lib/store/authStore'
-import { startAlarm, stopAlarm } from '../../lib/sound'
+import { 
+  previewAlarm, 
+  stopAlarm, 
+  isAlarmPlaying, 
+  pickAndSaveCustomAlarm, 
+  removeCustomAlarm 
+} from '../../lib/sound'
 import { showToast, ToastContainer } from '../../components/Toast'
 import { theme } from '../../constants/theme'
 
@@ -70,19 +76,23 @@ export default function SettingsScreen() {
     }
   }
 
+  // Debounced volume save
+  const volumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   async function saveVolume(val: number) {
     if (!settings) return
     setSettings(prev => prev ? { ...prev, alarmVolume: val } : prev)
-    try {
-      await client.patch(settings._id).set({ alarmVolume: val }).commit()
-    } catch {
-      showToast('Failed to save volume', 'error')
-    }
-  }
-
-  async function testAlarm() {
-    await startAlarm(settings?.alarmVolume ?? 8)
-    setTimeout(async () => await stopAlarm(), 3000)
+    
+    if (volumeTimer.current) clearTimeout(volumeTimer.current)
+    
+    volumeTimer.current = setTimeout(async () => {
+      try {
+        await client.patch(settings._id).set({ alarmVolume: val }).commit()
+        console.log('[settings] Volume saved to Sanity:', val)
+      } catch {
+        showToast('Failed to save volume', 'error')
+      }
+    }, 800)
   }
 
   function handleSignOut() {
@@ -123,36 +133,114 @@ export default function SettingsScreen() {
 
       {/* Alarm Settings */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Kitchen Alarm</Text>
+        <Text style={styles.alarmSectionTitle}>Alarm Sound</Text>
 
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Alarm Sound Enabled</Text>
-          <Switch
-            value={settings?.alarmEnabled ?? true}
-            onValueChange={toggleAlarm}
-            trackColor={{ false: theme.colors.palace.stone, true: theme.colors.status.ready }}
-            thumbColor={theme.colors.cream.DEFAULT}
+        {/* Current Sound Indicator */}
+        <View style={styles.currentSoundRow}>
+          <View style={styles.soundInfo}>
+            <Text style={settings?.useCustomAlarm ? styles.soundNameGold : styles.soundNameCream}>
+              🔔 {settings?.useCustomAlarm ? 'Custom Sound' : 'Default Alarm'}
+            </Text>
+            <Text style={styles.soundSubtitle}>
+              {settings?.useCustomAlarm ? 'Your uploaded alarm sound' : 'Built-in kitchen alarm'}
+            </Text>
+          </View>
+        </View>
+
+        {/* Action Buttons */}
+        <View style={styles.alarmActions}>
+          <TouchableOpacity 
+            style={[styles.actionBtn, styles.testBtnBorder]} 
+            onPress={async () => {
+              if (isAlarmPlaying()) {
+                await stopAlarm()
+                setSettings(s => s ? { ...s } : s) // Force re-render
+              } else {
+                await previewAlarm(settings?.alarmVolume ?? 8, 3000)
+                setSettings(s => s ? { ...s } : s) // Force re-render
+              }
+            }}
+          >
+            <Text style={styles.testBtnTextGold}>
+              {isAlarmPlaying() ? '⏹  Stop' : '▶  Test Alarm Sound (3 seconds)'}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.actionBtn} onPress={async () => {
+            const result = await pickAndSaveCustomAlarm()
+            if (result.success) {
+              showToast('Custom alarm saved!', 'success')
+              if (settings) {
+                await client.patch(settings._id).set({ useCustomAlarm: true }).commit()
+                setSettings({ ...settings, useCustomAlarm: true })
+              }
+            } else if (result.error !== 'Cancelled') {
+              showToast(result.error || 'Failed to upload', 'error')
+            }
+          }}>
+            <Text style={styles.actionBtnText}>📁  Upload Custom Alarm from Tablet</Text>
+          </TouchableOpacity>
+
+          {settings?.useCustomAlarm && (
+            <TouchableOpacity 
+              style={styles.removeBtn} 
+              onPress={() => {
+                Alert.alert(
+                  'Remove your custom alarm?',
+                  'The default alarm sound will be used instead.',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    { 
+                      text: 'Remove', 
+                      style: 'destructive',
+                      onPress: async () => {
+                        await removeCustomAlarm()
+                        if (settings) {
+                          await client.patch(settings._id).set({ useCustomAlarm: false }).commit()
+                          setSettings({ ...settings, useCustomAlarm: false })
+                        }
+                        showToast('Reverted to default alarm', 'success')
+                      }
+                    }
+                  ]
+                )
+              }}
+            >
+              <Text style={styles.removeBtnText}>↩  Remove Custom — Use Default Alarm</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* Volume Slider */}
+        <View style={styles.volumeContainer}>
+          <Text style={styles.rowLabel}>Alarm Volume</Text>
+          <Slider
+            style={styles.slider}
+            minimumValue={1}
+            maximumValue={10}
+            step={1}
+            value={settings?.alarmVolume ?? 8}
+            onValueChange={(val) => setSettings(s => s ? { ...s, alarmVolume: val } : s)}
+            onSlidingComplete={saveVolume}
+            minimumTrackTintColor={theme.colors.gold.DEFAULT}
+            maximumTrackTintColor={theme.colors.palace.stone}
+            thumbTintColor={theme.colors.gold.DEFAULT}
           />
-        </View>
+          <Text style={styles.volumeLargeText}>{settings?.alarmVolume ?? 8}/10</Text>
+          
+          <TouchableOpacity 
+            style={styles.volumeTestLink}
+            onPress={() => previewAlarm(settings?.alarmVolume ?? 8, 2000)}
+          >
+            <Text style={styles.volumeTestLinkText}>Test at current volume</Text>
+          </TouchableOpacity>
 
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Volume: {settings?.alarmVolume ?? 8}/10</Text>
+          <View style={styles.androidTip}>
+            <Text style={styles.androidTipText}>
+              💡 For maximum loudness, also ensure the tablet volume is set to maximum in Android Settings → Sound → Media Volume.
+            </Text>
+          </View>
         </View>
-        <Slider
-          style={styles.slider}
-          minimumValue={1}
-          maximumValue={10}
-          step={1}
-          value={settings?.alarmVolume ?? 8}
-          onSlidingComplete={saveVolume}
-          minimumTrackTintColor={theme.colors.gold.DEFAULT}
-          maximumTrackTintColor={theme.colors.palace.stone}
-          thumbTintColor={theme.colors.gold.DEFAULT}
-        />
-
-        <TouchableOpacity style={styles.testBtn} onPress={testAlarm}>
-          <Text style={styles.testBtnText}>🔔 Test Alarm (3s)</Text>
-        </TouchableOpacity>
       </View>
 
       {/* App Info */}
@@ -244,6 +332,100 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
     textTransform: 'uppercase',
     marginBottom:  4,
+  },
+  alarmSectionTitle: {
+    fontSize:      12,
+    letterSpacing: 2,
+    textTransform: 'uppercase',
+    color:         'rgba(240, 230, 200, 0.4)',
+    marginBottom:  16,
+  },
+  currentSoundRow: {
+    marginBottom: 20,
+  },
+  soundInfo: {
+    gap: 4,
+  },
+  soundNameGold: {
+    color: theme.colors.gold.DEFAULT,
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  soundNameCream: {
+    color: theme.colors.cream.DEFAULT,
+    fontSize: 16,
+    fontWeight: '700',
+    opacity: 0.7,
+  },
+  soundSubtitle: {
+    color: 'rgba(240, 230, 200, 0.4)',
+    fontSize: 12,
+  },
+  alarmActions: {
+    gap: 12,
+    marginBottom: 24,
+  },
+  actionBtn: {
+    backgroundColor: theme.colors.palace.smoke,
+    borderWidth: 1,
+    borderColor: theme.colors.palace.stone,
+    borderRadius: 8,
+    paddingVertical: 14,
+    alignItems: 'center',
+    width: '100%',
+  },
+  testBtnBorder: {
+    borderColor: 'rgba(212, 175, 55, 0.4)',
+  },
+  testBtnTextGold: {
+    color: theme.colors.gold.DEFAULT,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  actionBtnText: {
+    color: 'rgba(240, 230, 200, 0.6)',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  removeBtn: {
+    marginTop: 8,
+    alignSelf: 'center',
+  },
+  removeBtnText: {
+    color: 'rgba(240, 230, 200, 0.3)',
+    fontSize: 12,
+    textDecorationLine: 'underline',
+  },
+  volumeContainer: {
+    marginTop: 10,
+    gap: 15,
+  },
+  volumeLargeText: {
+    fontSize: 24,
+    color: theme.colors.gold.DEFAULT,
+    textAlign: 'center',
+    marginTop: -5,
+  },
+  volumeTestLink: {
+    alignSelf: 'center',
+    marginTop: -5,
+  },
+  volumeTestLinkText: {
+    color: 'rgba(240, 230, 200, 0.3)',
+    fontSize: 12,
+    textDecorationLine: 'underline',
+  },
+  androidTip: {
+    borderLeftWidth: 2,
+    borderLeftColor: 'rgba(245, 158, 11, 0.3)',
+    paddingLeft: 12,
+    marginTop: 8,
+  },
+  androidTipText: {
+    fontSize: 10,
+    fontStyle: 'italic',
+    color: 'rgba(251, 191, 36, 0.6)',
+    lineHeight: 16,
   },
   pinRow: {
     flexDirection:  'row',
